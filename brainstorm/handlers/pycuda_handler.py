@@ -57,7 +57,8 @@ class PyCudaHandler(Handler):
         elif n < (max_blocks * max_threads):
             block_count = max_blocks
             grp = (n + min_threads - 1) // min_threads
-            threads_per_block = ((grp + max_blocks - 1) // max_blocks) * min_threads
+            threads_per_block = (((grp + max_blocks - 1) // max_blocks) *
+                                 min_threads)
         else:
             block_count = max_blocks
             threads_per_block = max_threads
@@ -173,19 +174,74 @@ class PyCudaHandler(Handler):
                            grid=(get_blocks(inputs.size), 1))
         
         
-    def strided_elementwise(self, inputs, outputs, stride,func):
+    def strided_elementwise(self, inputs, outputs, idx,func):
         shape = self.handle_shape(inputs.shape)
         
         if func not in strided_funcs: 
             raise Exception("Strided function not supported. \
                             Supported functions are: {0}"
-                            .format(strided_inp_funcs.keys()))
+                            .format(strided_funcs.keys()))
         
         
-        strided_funcs[func](inputs, outputs, np.int32(stride),                                
+        strided_funcs[func](inputs, outputs, np.int32(idx),                                
                            shape[0],shape[1], shape[2], shape[3], shape[4],
                            block=(NUM_CUDA_THREADS, 1, 1),
                            grid=(get_blocks(inputs.size), 1))
+        
+        
+    def strided_mm_inp(self, input, idx1, stacksize, func):
+        self.strided_mm(input, self.allocate(1), self.allocate(1), idx1, idx1, stacksize, func)        
+      
+    
+    def half_strided_mm(self, m1, m2, outputs, idx1, stacksize, func): 
+        if m1.shape[-1] % stacksize != 0:
+            raise Exception("Error in strided_mm: Feature must be multiple of stacksize.")
+
+        if len(m1.shape) != 2:
+            raise Exception('''Error in strided_mm: 
+            Only 2 dimensional tensors 
+            are supported for strided elementwise operations.''')
+        
+        
+        if m2.shape != outputs.shape:
+            raise Exception('''Error in strided_mm: 
+            The second matrix must have same shape as outputs.''')
+            
+        if func not in half_strided_mm_funcs: 
+            raise Exception("Strided function not supported. \
+                            Supported functions are: {0}"
+                            .format(half_strided_mm_funcs.keys()))
+                
+        
+        half_strided_mm_funcs[func](m1, m2, outputs, 
+                               np.int32(idx1), np.int32(idx1),  np.int32(stacksize),
+                           np.int32(m1.shape[0]),np.int32(m1.shape[1]),
+                           block=(NUM_CUDA_THREADS,1, 1),
+                           grid=(get_blocks(m1.size), 1))
+        
+    def strided_mm(self, m1, m2, outputs, idx1, idx2, stacksize, func):
+             
+        
+        if m1.shape[-1] % stacksize != 0:
+            raise Exception("Error in strided_mm: Feature must be multiple of stacksize.")
+
+        if len(m1.shape) != 2:
+            raise Exception('''Error in strided_mm: 
+            Only 2 dimensional tensors 
+            are supported for strided elementwise operations.''')
+        
+        
+        if func not in strided_mm_funcs: 
+            raise Exception("Strided function not supported. \
+                            Supported functions are: {0}"
+                            .format(strided_mm_funcs.keys()))
+                
+        
+        strided_mm_funcs[func](m1, m2, outputs, 
+                               np.int32(idx1), np.int32(idx2),  np.int32(stacksize),
+                           np.int32(m1.shape[0]),np.int32(m1.shape[1]),
+                           block=(NUM_CUDA_THREADS,1, 1),
+                           grid=(get_blocks(m1.size), 1))
 
     def avgpool2d_forward_batch(self, inputs, window, outputs, padding,
                                 stride):
@@ -524,7 +580,8 @@ index_m_by_v_kernel = ElementwiseKernel(
 
 modulo_tt_kernel = ElementwiseKernel(
     "float* a, float* b, float* out",
-    "out[i] =  (float)((int)((a >= 0) ? a[i]+0.5: a[i]-0.5) % (int)((b>=0) ? b[i]+0.5: b[i]-0.5))",
+    "out[i] =  (float)((int)((a >= 0) ? a[i]+0.5: a[i]-0.5) % (int)((b>=0) ? "
+    "b[i]+0.5: b[i]-0.5))",
     "modulo_tt_kernel"
 )
 
@@ -572,7 +629,8 @@ sigmoid_deriv_kernel = ElementwiseKernel(
 
 sigmoid_kernel = ElementwiseKernel(
     "float* x, float* y",
-    "y[i] = (x[i]>=0) ? 1.0/(1.0 + exp(-1.0*x[i])) : exp(1.0*x[i])/(1.0 + exp(1.0*x[i]))",
+    "y[i] = (x[i]>=0) ? 1.0/(1.0 + exp(-1.0*x[i])) : "
+    "exp(1.0*x[i])/(1.0 + exp(1.0*x[i]))",
     "sigmoid_kernel"
 )
 
@@ -605,7 +663,8 @@ __merge_kernel_code = """
     #include "float.h"
 
     __global__ void merge_kernel(float* a, float* b, float* out,
-                                 int n_rows, const int a_cols, const int b_cols) {
+                                 int n_rows, const int a_cols,
+                                 const int b_cols) {
         const int row = blockIdx.x * blockDim.x + threadIdx.x;
         const int n_cols = a_cols + b_cols;
         if (row >= n_rows)
@@ -627,7 +686,8 @@ __split_kernel_code = """
     #include "float.h"
 
     __global__ void split_kernel(float* x, float* out_a, float* out_b,
-                                 int n_rows, const int a_cols, const int b_cols) {
+                                 int n_rows, const int a_cols,
+                                 const int b_cols) {
         const int row = blockIdx.x * blockDim.x + threadIdx.x;
         const int n_cols = a_cols + b_cols;
         if (row >= n_rows)
@@ -701,7 +761,8 @@ _softmax_impl = _mod_softmax.get_function("softmax_kernel")
 
 __im2col_fp32_kernel_code = """
     __global__ void im2col_fp32_kernel(const int n, const float* data_im,
-        const int height, const int width, const int kernel_h, const int kernel_w,
+        const int height, const int width, const int kernel_h,
+        const int kernel_w,
         const int pad_t, const int pad_l,
         const int stride_h, const int stride_w,
         const int width_col, const int channels,
@@ -757,18 +818,19 @@ __col2im_fp32_kernel_code = """
         /*
         for (int h_col = h_col_start; h_col < h_col_end; ++h_col) {
           for (int w_col = w_col_start; w_col < w_col_end; ++w_col) {
-            int c_col = ((h - h_col * stride_h) * patch_w + w - w_col * stride_w) * channels + c;
-            val += data_col[(h_col * width_col + w_col) * channels_col + c_col];
+            int c_col = ((h - h_col * stride_h) * patch_w + w -
+                         w_col * stride_w) * channels + c;
+            val += data_col[(h_col*width_col + w_col) * channels_col + c_col];
           }
         }
         */
         // Equivalent of above
         int offset = (h * patch_w + w) * channels + c;
-        int coeff_h_col = width_col * channels_col - stride_h * patch_w * channels;
+        int coeff_h_col = width_col*channels_col - stride_h*patch_w*channels;
         int coeff_w_col = channels_col - stride_w * channels;
         for (int h_col = h_col_start; h_col < h_col_end; ++h_col) {
           for (int w_col = w_col_start; w_col < w_col_end; ++w_col) {
-            val += data_col[offset + h_col * coeff_h_col + w_col * coeff_w_col];
+            val += data_col[offset + h_col * coeff_h_col + w_col*coeff_w_col];
           }
         }
         data_im[index] += val;
@@ -833,7 +895,8 @@ __maxpool_bwd_fp32_kernel = """
            index += blockDim.x * gridDim.x) {
         if (!(mask[index] < 0.0)) {
           int image_id = (index / top_offset);
-          atomicAdd(bottom_diff + image_id * bottom_offset + (int)(mask[index]),top_diff[index]);
+          atomicAdd(bottom_diff + image_id * bottom_offset +
+                    (int)(mask[index]),top_diff[index]);
         }
       }
     }
@@ -847,7 +910,7 @@ __avepool_fwd_fp32_kernel = """
         const int num, const int height, const int width,
         const int channels, const int pooled_height, const int pooled_width,
         const int kernel_h, const int kernel_w, const int stride_h,
-        const int stride_w, const int pad_t, const int pad_l, float* top_data) {
+        const int stride_w, const int pad_t, const int pad_l, float* top_data){
       for (int index = blockIdx.x * blockDim.x + threadIdx.x;
            index < (nthreads);
            index += blockDim.x * gridDim.x) {
@@ -911,7 +974,7 @@ __avepool_bwd_fp32_kernel = """
             wstart = max(wstart, 0);
             int pool_size = (hend - hstart) * (wend - wstart);
             gradient +=
-                top_diff_slice[(ph * pooled_width + pw) * channels] / pool_size;
+                top_diff_slice[(ph*pooled_width + pw) * channels] / pool_size;
           }
         }
         bottom_diff[index] += gradient;
@@ -928,10 +991,11 @@ __strided_elewise_inp = """
     {{
         int index = blockIdx.x * blockDim.x + threadIdx.x;
         int idx = 0;
+        int dim_product = (dim1*dim2*dim3*dim4);
         
-        for(int i = index; i < dim1*dim2*dim3*dim4; i+=blockDim.x * gridDim.x)
+        for(int i = index; i < dim_product; i+=blockDim.x * gridDim.x)
         {{       
-            idx = (dim1*dim2*dim3*dim4*matrixIndex) + i;            
+            idx = (dim_product*matrixIndex) + i;            
             
             in[idx] = {1};
         }}               
@@ -953,21 +1017,100 @@ strided_inp_funcs['logistic'] = _strided_elewise_inp_logistic
 strided_inp_funcs['tanh'] = _strided_elewise_inp_tanh
 
 
+__strided_mm = """
+        __global__ void strided_mm_{0}(float *m1, float*m2, float *out,
+         int matrixIndex1, int matrixIndex2, int numStacks,  int rows, int cols) 
+        {{
+            
+            
+            int index = blockIdx.x * blockDim.x + threadIdx.x;
+            int size = rows*cols;            
+             
+            int row = 0;
+            int col = 0;
+            int idx1 = 0;
+            int idx2 = 0;
+            int idx_out = 0;
+            int size_per_stack = cols / numStacks;            
+            int startIdx1 = matrixIndex1*size_per_stack;
+            int offset = (matrixIndex2-matrixIndex1)*size_per_stack;            
+            
+            for(int i = index; i < size; i+=blockDim.x * gridDim.x)
+            {{    
+            
+                    row = i/cols;
+                    col = i-(row*cols);
+                    if((col >= startIdx1) && col < (startIdx1+size_per_stack))
+                    {{                   
+                            
+                            idx1 = (cols*row) + col;
+                            idx2 = (cols*row) + col + offset;
+                            idx_out = (size_per_stack*row) + col-startIdx1;
+                            {1};
+                    }} 
+                   
+                
+            }}  
+                          
+        }}
+        """
+__strided_mul_mm = __strided_mm.format("mul",
+                        "out[idx_out] = m1[idx1] * m2[idx2]"     
+                        )
+_mod_strided_mul_mm = SourceModule(__strided_mul_mm)
+_strided_mul_mm = _mod_strided_mul_mm.get_function(
+                                "strided_mm_mul")
+
+__strided_logistic_mm = __strided_mm.format("logistic",
+                        "m1[idx1] = 1.0f/(1.0f+__expf(-m1[idx1]))"  
+                        )
+_mod_strided_logistic_mm = SourceModule(__strided_logistic_mm)
+_strided_logistic_mm = _mod_strided_logistic_mm.get_function(
+                                "strided_mm_logistic")
+
+__strided_tanh_mm = __strided_mm.format("tanh",
+                        "m1[idx1] = tanh(m1[idx1])"  
+                        )
+_mod_strided_tanh_mm = SourceModule(__strided_tanh_mm)
+_strided_tanh_mm = _mod_strided_tanh_mm.get_function(
+                                "strided_mm_tanh")
+
+__half_strided_addmul_mm = __strided_mm.format("addmul",
+                        "out[idx_out] += m1[idx1] * m2[idx_out]")
+_mod_half_strided_addmul_mm = SourceModule(__half_strided_addmul_mm)
+_half_strided_addmul_mm = _mod_half_strided_addmul_mm.get_function(
+                                "strided_mm_addmul")
+
+__half_strided_mul_mm = __strided_mm.format("mul",
+                        "out[idx_out] = m1[idx1] * m2[idx_out]")
+_mod_half_strided_mul_mm = SourceModule(__half_strided_mul_mm)
+_half_strided_mul_mm = _mod_half_strided_mul_mm.get_function(
+                                "strided_mm_mul")
+
+strided_mm_funcs = {}
+strided_mm_funcs['mul'] = _strided_mul_mm
+strided_mm_funcs['logistic'] = _strided_logistic_mm
+strided_mm_funcs['tanh'] = _strided_tanh_mm
+
+half_strided_mm_funcs = {}
+half_strided_mm_funcs['addmul'] = _half_strided_addmul_mm
+half_strided_mm_funcs['mul'] = _half_strided_mul_mm
+
+
 __strided_elewise = """
     __global__ void strided_elementwise_{0}(float *in, float *out,
      int matrixIndex, int dim1, int dim2, int dim3, int dim4, int dim5) 
     {{
         int index = blockIdx.x * blockDim.x + threadIdx.x;
         int idx = 0;
+        int dim_product = (dim1*dim2*dim3*dim4);
         
         for(int d5 = 0; d5 < dim5; d5++)
         {{        
-            for(int i = index; i < dim1*dim2*dim3*dim4; i+=blockDim.x * gridDim.x)
+            for(int i = index; i < dim_product; i+=blockDim.x * gridDim.x)
             {{       
-                idx = (dim1*dim2*dim3*dim4*d5) + i;            
-                
+                idx = (dim_product*d5) + i; 
                 if(d5 == matrixIndex){{ out[idx] = {1}; }}
-                else{{ out[idx] = in[idx]; }}
             }}    
         }}               
     }}
