@@ -219,6 +219,62 @@ class PyCudaHandler(Handler):
                            block=(NUM_CUDA_THREADS,1, 1),
                            grid=(get_blocks(m1.size), 1))
         
+        
+        
+    def double_strided_output_mm(self, m1, m2, outputs, idx1, idx2, stacksize, func): 
+        if m1.shape[-1] % stacksize != 0:
+            raise Exception("Error in strided_mm: Feature must be multiple of stacksize.")
+
+        if len(m1.shape) != 2:
+            raise Exception('''Error in strided_mm: 
+            Only 2 dimensional tensors 
+            are supported for strided elementwise operations.''')
+        
+        
+        if m1.shape != outputs.shape:
+            raise Exception('''Error in strided_mm: 
+            The first matrix must have same shape as outputs.''')
+            
+        if func not in double_strided_output_mm_funcs: 
+            raise Exception("Strided function not supported. \
+                            Supported functions are: {0}"
+                            .format(double_strided_output_mm_funcs.keys()))
+                
+        
+        double_strided_output_mm_funcs[func](m1, m2, outputs, 
+                               np.int32(idx1), np.int32(idx2),  np.int32(stacksize),
+                           np.int32(m1.shape[0]),np.int32(m1.shape[1]),
+                           block=(NUM_CUDA_THREADS,1, 1),
+                           grid=(get_blocks(m1.size), 1))
+        
+        
+        
+    def strided_output_mm(self, m1, m2, outputs, idx1, idx2, stacksize, func): 
+        if m1.shape[-1] % stacksize != 0:
+            raise Exception("Error in strided_mm: Feature must be multiple of stacksize.")
+
+        if len(m1.shape) != 2:
+            raise Exception('''Error in strided_mm: 
+            Only 2 dimensional tensors 
+            are supported for strided elementwise operations.''')
+        
+        
+        if m1.shape != m2.shape:
+            raise Exception('''Error in strided_output_mm: 
+            The first matrix must have same shape as the second matrix.''')
+            
+        if func not in double_strided_output_mm_funcs: 
+            raise Exception("Strided function not supported. \
+                            Supported functions are: {0}"
+                            .format(strided_output_mm_funcs.keys()))
+                
+        
+        strided_output_mm_funcs[func](m1, m2, outputs, 
+                               np.int32(idx1), np.int32(idx2),  np.int32(stacksize),
+                           np.int32(m1.shape[0]),np.int32(m1.shape[1]),
+                           block=(NUM_CUDA_THREADS,1, 1),
+                           grid=(get_blocks(m1.size), 1))
+        
     def strided_mm(self, m1, m2, outputs, idx1, idx2, stacksize, func):
              
         
@@ -1034,7 +1090,7 @@ __strided_mm = """
             int size_per_stack = cols / numStacks;            
             int startIdx1 = matrixIndex1*size_per_stack;
             int offset = (matrixIndex2-matrixIndex1)*size_per_stack;            
-            
+                
             for(int i = index; i < size; i+=blockDim.x * gridDim.x)
             {{    
             
@@ -1087,6 +1143,30 @@ _mod_half_strided_mul_mm = SourceModule(__half_strided_mul_mm)
 _half_strided_mul_mm = _mod_half_strided_mul_mm.get_function(
                                 "strided_mm_mul")
 
+__double_strided_output_mul_mm = __strided_mm.format("mul",
+                        "out[idx2] = m1[idx1] * m2[idx_out]")
+_mod_double_strided_output_mul_mm = SourceModule(__double_strided_output_mul_mm)
+_double_strided_output_mul_mm = _mod_double_strided_output_mul_mm.get_function(
+                                "strided_mm_mul")
+
+__double_strided_output_tanh_deriv_mm = __strided_mm.format("tanh_deriv",
+                        "out[idx1] = m1[idx1] *(1.- (m2[idx2]*m2[idx2]))")#dx = dy*(1-y*y)
+_mod_double_strided_output_tanh_deriv_mm = SourceModule(__double_strided_output_tanh_deriv_mm)
+_double_strided_output_tanh_deriv_mm = _mod_double_strided_output_tanh_deriv_mm.get_function(
+                                "strided_mm_tanh_deriv")
+
+__double_strided_output_sigmoid_deriv_mm = __strided_mm.format("sigmoid_deriv",
+                        "out[idx1] = m1[idx1] *m2[idx2]*(1.- m2[idx2])")#dx[:] = dy * y * (1. - y)
+_mod_double_strided_output_sigmoid_deriv_mm = SourceModule(__double_strided_output_sigmoid_deriv_mm)
+_double_strided_output_sigmoid_deriv_mm = _mod_double_strided_output_sigmoid_deriv_mm.get_function(
+                                "strided_mm_sigmoid_deriv")
+
+__strided_output_mul_mm = __strided_mm.format("mul",
+                        "out[idx1] = m1[idx_out] * m2[idx_out]")
+_mod_strided_output_mul_mm = SourceModule(__strided_output_mul_mm)
+_strided_output_mul_mm = _mod_strided_output_mul_mm.get_function(
+                                "strided_mm_mul")
+
 strided_mm_funcs = {}
 strided_mm_funcs['mul'] = _strided_mul_mm
 strided_mm_funcs['logistic'] = _strided_logistic_mm
@@ -1095,6 +1175,14 @@ strided_mm_funcs['tanh'] = _strided_tanh_mm
 half_strided_mm_funcs = {}
 half_strided_mm_funcs['addmul'] = _half_strided_addmul_mm
 half_strided_mm_funcs['mul'] = _half_strided_mul_mm
+
+double_strided_output_mm_funcs = {}
+double_strided_output_mm_funcs['mul'] = _double_strided_output_mul_mm
+double_strided_output_mm_funcs['tanh_deriv'] = _double_strided_output_tanh_deriv_mm
+double_strided_output_mm_funcs['sigmoid_deriv'] = _double_strided_output_tanh_deriv_mm
+
+strided_output_mm_funcs = {}
+strided_output_mm_funcs['mul'] = _strided_output_mul_mm
 
 
 __strided_elewise = """

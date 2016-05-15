@@ -3,6 +3,7 @@
 *.hdf5
 *.gz
 *.npy
+*.zip
 
 ### Python ###
 # Byte-compiled / optimized / DLL files

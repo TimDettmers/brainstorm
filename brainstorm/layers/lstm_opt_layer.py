@@ -147,14 +147,22 @@ class LstmOptLayerImpl(Layer):
             _h.half_strided_mm(S[t+1],dCa[t+1],dCa[t],2,4,'addmul')
 
             # Block Input and Gates
-            _h.mult_tt(dCa[t], I[t], dZ[t])
-            _h.mult_tt(dCa[t], Z[t], dI[t])
-            _h.mult_tt(dCa[t], Ca[t - 1], dF[t])
-            _h.mult_tt(dy[t], Cb[t], dO[t])
+            _h.double_strided_output_mm(S[t+1],dCa[t+1],dS[t],1,0,4,'mul')
+            #_h.mult_tt(dCa[t], I[t], dZ[t])
+            _h.double_strided_output_mm(S[t+1],dCa[t+1],dS[t],0,1,4,'mul')
+            #_h.mult_tt(dCa[t], Z[t], dI[t])
+            _h.strided_output_mm(dCa[t], Ca[t - 1],dS[t],2,2,4,'mul')
+            #_h.mult_tt(dCa[t], Ca[t - 1], dF[t])
+            _h.strided_output_mm(dy[t], Cb[t],dS[t],3,3,4,'mul')            
+            #_h.mult_tt(dy[t], Cb[t], dO[t])
 
             # Activation functions
-            _h.act_func_deriv[self.activation](None, Z[t], dZ[t], dZ[t])
-            _h.sigmoid_deriv(None, gates[t], dgates[t], dgates[t])
+            _h.double_strided_output_mm(dS[t],S[t],dS[t],0,0,4,'tanh_deriv')
+            #_h.act_func_deriv[self.activation](None, Z[t], dZ[t], dZ[t])
+            _h.double_strided_output_mm(dS[t],S[t],dS[t],1,1,4,'sigmoid_deriv')
+            _h.double_strided_output_mm(dS[t],S[t],dS[t],2,2,4,'sigmoid_deriv')
+            _h.double_strided_output_mm(dS[t],S[t],dS[t],3,3,4,'sigmoid_deriv')
+            #_h.sigmoid_deriv(None, gates[t], dgates[t], dgates[t])
 
         # Gradient for the recurrent weights
         flat_y = y[:-2].reshape(((time_size - 1) * batch_size, y.shape[2]))
